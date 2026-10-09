@@ -606,7 +606,7 @@ function App() {
     <main className="dashboard">
       <section className="page-intro">
         <div>
-          <h1>Panorama eleitoral de Cuiabá - 2026</h1>
+          <h1>Panorama eleitoral de Cuiabá - Votos para Presidente - 2026</h1>
         </div>        
       </section>
 
