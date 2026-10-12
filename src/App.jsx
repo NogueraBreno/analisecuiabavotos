@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { geoJSON } from 'leaflet'
 import Papa from 'papaparse'
 import { GeoJSON, MapContainer, TileLayer, useMap } from 'react-leaflet'
+import neighborhoodBoundariesJson from './assets/data/cuiaba_bairros.geojson?raw'
 import neighborhoodCsv from './assets/data/Votacao por Secao Zona Bairro Regiao - Cuiaba 2026 - Consolidado por Bairro.csv?raw'
 import regionCsv from './assets/data/Votacao por Secao Zona Bairro Regiao - Cuiaba 2026 - Consolidado por Regiao.csv?raw'
 import reductionCsv from './assets/data/Votacao por Secao Zona Bairro Regiao - Cuiaba 2026 - Bairros - Pricipais Reduções Votos.csv?raw'
@@ -11,19 +12,20 @@ import './App.css'
 const numberFormat = new Intl.NumberFormat('pt-BR')
 const CUIABA_CENTER = [-15.601, -56.097]
 const CUIABA_ZOOM = 11
+const neighborhoodBoundaryData = JSON.parse(neighborhoodBoundariesJson)
+const LOST_VOTE_PATTERN_ID = 'lost-vote-hatch'
+const neighborhoodBoundaries = {
+  ...neighborhoodBoundaryData,
+  features: neighborhoodBoundaryData.features.filter(
+    (feature) =>
+      ['Polygon', 'MultiPolygon'].includes(feature.geometry?.type) &&
+      typeof feature.properties?.name === 'string' &&
+      feature.properties.name.trim(),
+  ),
+}
 const percentFormat = new Intl.NumberFormat('pt-BR', {
   maximumFractionDigits: 1,
 })
-
-const metrics = [
-  { id: 'plVotes', label: 'Votos PL', format: 'number' },
-  { id: 'ptVotes', label: 'Votos PT', format: 'number' },
-  { id: 'plShare', label: 'Participação PL', format: 'percent' },
-  { id: 'ptShare', label: 'Participação PT', format: 'percent' },
-  { id: 'turnout', label: 'Comparecimento', format: 'percent' },
-  { id: 'abstention', label: 'Abstenção', format: 'number' },
-  { id: 'margin', label: 'Vantagem PL − PT', format: 'number' },
-]
 
 const tableSortOptions = [
   { id: 'name', label: 'Bairro', type: 'text' },
@@ -236,24 +238,7 @@ function formatMetric(value, format = 'number') {
   return numberFormat.format(value)
 }
 
-function metricColor(value, metric, extent) {
-  if (metric === 'margin') {
-    if (value > 0) return value > extent.max * 0.55 ? '#19745c' : '#65a58c'
-    if (value < 0) return value < extent.min * 0.55 ? '#b84f54' : '#d58d87'
-    return '#e5e9e7'
-  }
-  const range = extent.max - extent.min || 1
-  const strength = Math.max(0, Math.min(1, (value - extent.min) / range))
-  const colors = ['#e7f2ed', '#b4d6c8', '#65a58c', '#28775f']
-  return colors[Math.min(colors.length - 1, Math.floor(strength * colors.length))]
-}
-
-function getFeatureName(feature, field) {
-  if (feature.properties?.lookupBoundary) return feature.properties.name
-  return feature.properties?.[field]
-}
-
-function MapViewport({ boundary, selectedBoundary, recenterKey }) {
+function MapViewport({ boundary, rowsByName, selectedName, recenterKey }) {
   const map = useMap()
   const previousRecenterKey = useRef(recenterKey)
 
@@ -264,37 +249,77 @@ function MapViewport({ boundary, selectedBoundary, recenterKey }) {
       return
     }
 
-    const features = [
-      ...(boundary?.features ?? []),
-      ...(selectedBoundary?.features ?? []),
-    ]
+    const selectedFeature = selectedName
+      ? boundary.features.find((feature) => {
+          const featureName = normalize(feature.properties?.name)
+          const row = rowsByName.get(featureName)
+          return row?.key === selectedName || featureName === selectedName
+        })
+      : null
+    if (selectedName && !selectedFeature) return
+    const features = selectedFeature ? [selectedFeature] : boundary.features
     if (features.length === 0) return
 
     const bounds = geoJSON({ type: 'FeatureCollection', features }).getBounds()
     if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 14 })
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: selectedFeature ? 15 : 12 })
     }
-  }, [boundary, map, recenterKey, selectedBoundary])
+  }, [boundary, map, recenterKey, rowsByName, selectedName])
+
+  return null
+}
+
+function MapPatterns() {
+  const map = useMap()
+
+  useEffect(() => {
+    function addLostVotePattern() {
+      const svg = map.getPanes().overlayPane.querySelector('svg')
+      if (!svg || svg.querySelector(`#${LOST_VOTE_PATTERN_ID}`)) return
+
+      const namespace = 'http://www.w3.org/2000/svg'
+      let definitions = svg.querySelector('defs')
+      if (!definitions) {
+        definitions = document.createElementNS(namespace, 'defs')
+        svg.prepend(definitions)
+      }
+
+      const pattern = document.createElementNS(namespace, 'pattern')
+      pattern.setAttribute('id', LOST_VOTE_PATTERN_ID)
+      pattern.setAttribute('width', '8')
+      pattern.setAttribute('height', '8')
+      pattern.setAttribute('patternUnits', 'userSpaceOnUse')
+
+      const background = document.createElementNS(namespace, 'rect')
+      background.setAttribute('width', '8')
+      background.setAttribute('height', '8')
+      background.setAttribute('fill', '#9fd7f3')
+
+      const stripes = document.createElementNS(namespace, 'path')
+      stripes.setAttribute('d', 'M-2 2 L2 -2 M0 8 L8 0 M6 10 L10 6')
+      stripes.setAttribute('stroke', '#f8d5d8')
+      stripes.setAttribute('stroke-width', '1.5')
+
+      pattern.append(background, stripes)
+      definitions.append(pattern)
+    }
+
+    addLostVotePattern()
+    map.on('layeradd', addLostVotePattern)
+    return () => map.off('layeradd', addLostVotePattern)
+  }, [map])
 
   return null
 }
 
 function MapView({
   boundary,
-  selectedBoundary,
-  boundaryField,
   rowsByName,
-  activeRows,
-  metric,
-  extent,
   selectedName,
-  revision,
+  onSelectNeighborhood,
   recenterKey,
 }) {
-  const activeKeys = useMemo(() => new Set(activeRows.map((row) => row.key)), [activeRows])
-  const rowsByKey = rowsByName
-
-  function tooltipContent(row, name, currentMetric) {
+  function tooltipContent(row, name) {
     const content = document.createElement('div')
     const title = document.createElement('strong')
     title.textContent = row?.name ?? String(name ?? 'Bairro sem nome')
@@ -302,52 +327,70 @@ function MapView({
 
     if (row) {
       const region = document.createElement('span')
-      region.textContent = row.region
+      const winner = row.margin > 0 ? 'PL à frente' : row.margin < 0 ? 'PT à frente' : 'Empate'
+      region.textContent = `${row.region} · ${winner}`
       content.append(region, document.createElement('br'))
-      const metricLabel = metrics.find((item) => item.id === currentMetric)
       const value = document.createElement('span')
-      value.textContent = `${metricLabel?.label}: ${formatMetric(row[currentMetric], metricLabel?.format)}`
+      value.textContent = `PL: ${numberFormat.format(row.plShare)}% · PT: ${numberFormat.format(row.ptShare)}%`
       content.append(value)
     } else {
       const missing = document.createElement('span')
-      missing.textContent = 'Sem dados no CSV'
+      missing.textContent = name == 'Morada da Serra' ? 'Macro Região da Grande CPA' : 'Sem seção'
       content.append(missing)
     }
     return content
   }
 
   function styleFeature(feature) {
-    const name = normalize(getFeatureName(feature, boundaryField))
-    const row = rowsByKey.get(name)
-    const isActive = activeKeys.has(name)
-    const isSelected = row?.key === selectedName || feature.properties?.lookupBoundary === true
+    const featureName = normalize(feature.properties?.name)
+    const row = rowsByName.get(featureName)
+    const isCpaMacroregion = featureName === 'moradadaserra'
+    const isSelected = row?.key === selectedName || (isCpaMacroregion && selectedName === featureName)
+    const lostPtVotes = row?.reductionDifference < 0
+    const ptAhead = row?.ptShare > row?.plShare
+    const fillColor =
+      lostPtVotes
+        ? `url(#${LOST_VOTE_PATTERN_ID})`
+        : isCpaMacroregion
+          ? '#c9e8f7'
+          : !row
+            ? '#d8ddda'
+            : ptAhead
+              ? '#f8d5d8'
+              : '#c9e8f7'
     return {
-      color: isSelected ? '#102e27' : '#ffffff',
-      weight: isSelected ? 3 : 1.2,
+      color: isSelected ? '#102e27' : '#797979',
+      weight: lostPtVotes ? (isSelected ? 3.5 : 2) : isSelected ? 3 : 1,
       opacity: 1,
-      fillColor: row && isActive ? metricColor(row[metric], metric, extent) : '#d8ddda',
-      fillOpacity: row && isActive ? 0.82 : 0.36,
-      dashArray: row && isActive ? undefined : '4 4',
+      fillColor,
+      fillOpacity: row || isCpaMacroregion ? 0.8 : 0.28,
+      dashArray: row ? undefined : '4 4',
     }
   }
 
   const styleFeatureRef = useRef(styleFeature)
-  const metricRef = useRef(metric)
   useEffect(() => {
     styleFeatureRef.current = styleFeature
-    metricRef.current = metric
   })
 
   function bindFeature(feature, layer) {
-    const name = getFeatureName(feature, boundaryField)
-    const row = rowsByKey.get(normalize(name))
-    layer.bindTooltip(tooltipContent(row, name, metricRef.current))
+    const name = feature.properties?.name
+    const row = rowsByName.get(normalize(name))
+    layer.bindTooltip(tooltipContent(row, name))
     layer.on({
       mouseover: (event) => {
-        event.target.setStyle({ weight: 3, color: '#263d36' })
-        event.target.setTooltipContent(tooltipContent(row, name, metricRef.current))
+        event.target.setStyle({
+          weight: 3,
+          color: row?.reductionDifference < 0 ? '#a82e38' : '#263d36',
+        })
+        event.target.setTooltipContent(tooltipContent(row, name))
       },
       mouseout: (event) => event.target.setStyle(styleFeatureRef.current(feature)),
+      click: () => {
+        if (row || normalize(name) === 'moradadaserra') {
+          onSelectNeighborhood(row?.key ?? normalize(name))
+        }
+      },
     })
   }
 
@@ -365,39 +408,21 @@ function MapView({
       />
       <MapViewport
         boundary={boundary}
-        selectedBoundary={selectedBoundary}
+        rowsByName={rowsByName}
+        selectedName={selectedName}
         recenterKey={recenterKey}
       />
-      {boundary && (
-        <GeoJSON
-          key={`${revision}-${boundaryField}`}
-          data={boundary}
-          style={styleFeature}
-          onEachFeature={bindFeature}
-        />
-      )}
-      {selectedBoundary && (
-        <GeoJSON
-          key={`lookup-${revision}`}
-          data={selectedBoundary}
-          style={styleFeature}
-          onEachFeature={bindFeature}
-        />
-      )}
+      <GeoJSON
+        data={boundary}
+        style={styleFeature}
+        onEachFeature={bindFeature}
+      />
+      <MapPatterns />
     </MapContainer>
   )
 }
 
 function App() {
-  const fileInput = useRef(null)
-  const [boundary, setBoundary] = useState(null)
-  const [selectedBoundary, setSelectedBoundary] = useState(null)
-  const [boundaryRevision, setBoundaryRevision] = useState(0)
-  const [boundaryField, setBoundaryField] = useState('')
-  const [boundaryName, setBoundaryName] = useState('')
-  const [boundaryError, setBoundaryError] = useState('')
-  const [boundaryLoading, setBoundaryLoading] = useState(false)
-  const metric = 'plVotes'
   const [region, setRegion] = useState('Todas as regiões')
   const [search, setSearch] = useState('')
   const [selectedName, setSelectedName] = useState(null)
@@ -443,9 +468,8 @@ function App() {
   }, [activeRows, sortDirection, sortKey])
   const selectedRow = neighborhoods.find((row) => row.key === selectedName)
   const selectedRegion = regionRows.find((row) => row.key === normalize(region))
-  const showingRegionDetails = region !== 'Todas as regiões' && Boolean(selectedRegion)
-  const selectedNeighborhoodName = selectedRow?.name
-  const selectedNeighborhoodKey = selectedRow?.key
+  const showingRegionDetails =
+    !selectedRow && region !== 'Todas as regiões' && Boolean(selectedRegion)
   const totals = activeRows.reduce(
     (total, row) => ({
       voters: total.voters + row.voters,
@@ -454,134 +478,24 @@ function App() {
     }),
     { voters: 0, plVotes: 0, ptVotes: 0 },
   )
-  const extent = useMemo(() => {
-    const values = neighborhoods.map((row) => row[metric])
-    return { min: Math.min(...values), max: Math.max(...values) }
-  }, [metric, neighborhoods])
-  const featureCount = boundary?.features?.length ?? 0
-  const matchedFeatureCount =
-    boundary?.features?.filter((feature) => rowsByName.has(normalize(getFeatureName(feature, boundaryField)))).length ?? 0
-
-  function handleBoundaryUpload(event) {
-    const [file] = event.target.files ?? []
-    if (!file) return
-    setBoundaryError('')
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(String(reader.result))
-        if (
-          data.type !== 'FeatureCollection' ||
-          !Array.isArray(data.features) ||
-          data.features.some(
-            (feature) =>
-              !['Polygon', 'MultiPolygon'].includes(feature.geometry?.type) ||
-              !feature.properties ||
-              typeof feature.properties !== 'object',
-          )
-        ) {
-          throw new Error('Use um GeoJSON FeatureCollection com polígonos e nome dos bairros nas propriedades.')
-        }
-        const fields = [...new Set(data.features.flatMap((feature) => Object.keys(feature.properties)))]
-        const preferredField =
-          fields.find((field) => ['bairro', 'nome', 'name', 'neighborhood'].includes(normalize(field))) ??
-          fields.find((field) =>
-            data.features.some((feature) => typeof feature.properties[field] === 'string'),
-          )
-        if (!preferredField) {
-          throw new Error('O GeoJSON não possui uma propriedade de texto com o nome dos bairros.')
-        }
-        setBoundary(data)
-        setBoundaryRevision((revision) => revision + 1)
-        setBoundaryField(preferredField)
-        setBoundaryName(file.name)
-      } catch (error) {
-        setBoundary(null)
-        setBoundaryName('')
-        setBoundaryError(error instanceof Error ? error.message : 'Não foi possível ler este GeoJSON.')
-      }
-    }
-    reader.onerror = () => {
-      setBoundaryError('Não foi possível ler o arquivo selecionado.')
-    }
-    reader.readAsText(file, 'utf-8')
-    event.target.value = ''
-  }
-
-  useEffect(() => {
-    if (!selectedNeighborhoodName) return undefined
-    const controller = new AbortController()
-
-    const timeout = setTimeout(async () => {
-      try {
-        const params = new URLSearchParams({
-          q: `${selectedNeighborhoodName}, Cuiabá, Mato Grosso, Brasil`,
-          format: 'jsonv2',
-          polygon_geojson: '1',
-          addressdetails: '1',
-          countrycodes: 'br',
-          limit: '1',
-        })
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?${params}`,
-          {
-            headers: { Accept: 'application/json' },
-            signal: controller.signal,
-          },
-        )
-
-        if (!response.ok) {
-          throw new Error(`A busca de limites falhou (HTTP ${response.status}).`)
-        }
-
-        const results = await response.json()
-        const result = Array.isArray(results) && results.find((item) =>
-          ['Polygon', 'MultiPolygon'].includes(item.geojson?.type),
-        )
-        if (!result) {
-          throw new Error(`Não foi possivel marcar ${selectedNeighborhoodName} no mapa.`)
-        }
-
-        setSelectedBoundary({
-          type: 'FeatureCollection',
-          features: [
-            {
-              type: 'Feature',
-              properties: {
-                name: selectedNeighborhoodName,
-                lookupBoundary: true,
-                displayName: result.display_name,
-              },
-              geometry: result.geojson,
-            },
-          ],
-        })
-        setBoundaryRevision((revision) => revision + 1)
-      } catch (error) {
-        if (error.name === 'AbortError') return
-        setSelectedBoundary(null)
-        setBoundaryError(
-          error instanceof Error
-            ? error.message
-          : `Não foi possível buscar o limite de ${selectedNeighborhoodName}.`,
-        )
-      } finally {
-        if (!controller.signal.aborted) setBoundaryLoading(false)
-      }
-    }, 1000)
-
-    return () => {
-      clearTimeout(timeout)
-      controller.abort()
-    }
-  }, [selectedNeighborhoodKey, selectedNeighborhoodName])
+  const matchedNeighborhoodCount = useMemo(
+    () =>
+      new Set(
+        neighborhoodBoundaries.features
+          .map((feature) => normalize(feature.properties?.name))
+          .filter((key) => rowsByName.has(key)),
+      ).size,
+    [rowsByName],
+  )
 
   function handleSelectNeighborhood(name) {
-    if (name === selectedName) return
     setSelectedName(name)
-    setBoundaryError('')
-    setBoundaryLoading(Boolean(name))
-    if (!name) setSelectedBoundary(null)
+  }
+
+  function handleMapSelectNeighborhood(name) {
+    handleSelectNeighborhood(name)
+    const neighborhood = rowsByName.get(name)
+    setSearch(neighborhood?.name ?? (name === 'moradadaserra' ? 'Morada da Serra' : ''))
   }
 
   function handleRegionChange(event) {
@@ -640,63 +554,25 @@ function App() {
               <h2>Mapa dos bairros</h2>
             </div>
           </div>
-          {boundaryError && <p className="error-message" role="alert">{boundaryError}</p>}
-          
           <div className="map-shell">
             <MapView
-              boundary={boundary}
-              selectedBoundary={selectedBoundary}
-              boundaryField={boundaryField}
+              boundary={neighborhoodBoundaries}
               rowsByName={rowsByName}
-              activeRows={activeRows}
-              metric={metric}
-              extent={extent}
               selectedName={selectedName}
-              revision={boundaryRevision}
+              onSelectNeighborhood={handleMapSelectNeighborhood}
               recenterKey={mapRecenterKey}
             />
-            <input
-              ref={fileInput}
-              className="visually-hidden"
-              type="file"
-              accept=".geojson,.json,application/geo+json,application/json"
-              onChange={handleBoundaryUpload}
-            />
-            {boundaryLoading && (
-              <div className="map-empty-state" role="status">
-                <strong>Buscando limite do bairro…</strong>
-                <span>Consultando o OpenStreetMap.</span>
-              </div>
-            )}
           </div>
           <div className="map-footer">
-            <div className="map-legend">
-              <span>{metric === 'margin' ? 'PT à frente' : 'Menor'}</span>
-              <i className={metric === 'margin' ? 'legend-diverging' : ''} />
-              <span>{metric === 'margin' ? 'PL à frente' : 'Maior'}</span>
+            <div className="map-legend" aria-label="Legenda do mapa">
+              <span className="legend-item"><i className="legend-pl" /> PL venceu</span>
+              <span className="legend-item"><i className="legend-pt" /> PT venceu</span>
+              <span className="legend-item"><i className="legend-loss" /> PT perdeu votos 2024 x 2026</span>
             </div>
             <span className="boundary-info">
-              {boundary
-                ? `${boundaryName} · ${matchedFeatureCount}/${featureCount} bairros associados`
-                : selectedBoundary
-                  ? `Limite de ${selectedRow?.name} · OpenStreetMap`
-                  : 'Limites geográficos não carregados'}
+              {matchedNeighborhoodCount}/{neighborhoods.length} bairros associados · {neighborhoodBoundaries.features.length} polígonos
             </span>
           </div>
-          {boundary && (
-            <div className="boundary-controls">
-              <label htmlFor="boundary-field">Propriedade com nome do bairro</label>
-              <select
-                id="boundary-field"
-                value={boundaryField}
-                onChange={(event) => setBoundaryField(event.target.value)}
-              >
-                {[...new Set(boundary.features.flatMap((feature) => Object.keys(feature.properties)))].map((field) => (
-                  <option key={field} value={field}>{field}</option>
-                ))}
-              </select>
-            </div>
-          )}
         </article>
 
         <aside className="panel detail-panel">
@@ -777,7 +653,7 @@ function App() {
             </dl>
           ) : (
             <p className="details-placeholder">
-              Selecione uma região ou escolha um bairro na tabela completa abaixo para ver os detalhes.
+              Selecione uma região, clique em um polígono no mapa ou escolha um bairro na lista para ver os detalhes.
             </p>
           )}
         </aside>
